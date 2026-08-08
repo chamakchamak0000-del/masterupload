@@ -4886,10 +4886,11 @@ class ToonWorld4AllFinder:
         print(f"✅ TW4ALL: Found {len(encodes)} encode options")
 
         quality_urls = {}
-        # GDFlix first: it's the only host this bot can fully resolve to a
-        # direct file (via GDFlixResolver). FilePress/AppDrive/MEGA have no
-        # resolver here, so a link to them would just download an HTML page.
-        preferred_hosts = ['GDFlix', 'gdflix', 'FilePress', 'filepress', 'MEGA', 'mega', 'AppDrive', 'appdrive']
+        # GDFlix-only: it's the only host this bot can fully resolve to a
+        # direct file (via GDFlixResolver). Other hosts (MEGA/FilePress/
+        # AppDrive) have no resolver, so we skip them entirely rather than
+        # download their landing page or a broken file.
+        gdflix_names = ['gdflix']
 
         for encode in encodes:
             label = encode.get('readable', {}).get('codec', encode.get('resolution', 'Unknown'))
@@ -4897,17 +4898,20 @@ class ToonWorld4AllFinder:
             if not files:
                 continue
 
-            # Pick best host (prefer GDFlix, since it's the one we can fully resolve)
+            # Only accept a GDFlix file for this quality. If this quality
+            # wasn't uploaded to GDFlix, skip it — we don't have a resolver
+            # for MEGA/FilePress/AppDrive, and downloading their host page
+            # as-is just produces a broken file.
             chosen_file = None
-            for host_pref in preferred_hosts:
-                for f in files:
-                    if host_pref.lower() in f.get('host', '').lower():
-                        chosen_file = f
-                        break
-                if chosen_file:
+            for f in files:
+                if any(name in f.get('host', '').lower() for name in gdflix_names):
+                    chosen_file = f
                     break
+
             if not chosen_file:
-                chosen_file = files[0]
+                hosts_available = ', '.join(sorted({f.get('host', '?') for f in files})) or 'none'
+                print(f"   ⏭️ {label}: no GDFlix mirror (available: {hosts_available}) — skipping")
+                continue
 
             redirect_path = chosen_file.get('link', '')
             if not redirect_path:
@@ -4928,42 +4932,49 @@ class ToonWorld4AllFinder:
                 )
                 redir_html = redir_resp.text
                 redir_props = self._get_props(redir_html)
+
+                dl_url = None
                 if redir_props and 'link' in redir_props:
                     link_data = redir_props['link']
                     domain = link_data.get('domain', '')
                     hidden = link_data.get('hidden', '')
                     if domain and hidden:
                         dl_url = domain.rstrip('/') + '/' + hidden
-                        print(f"   ↪️ {label} host page: {dl_url[:60]}...")
+                if not dl_url and redir_props and redir_props.get('destination'):
+                    # Fallback shape seen on some redirect pages: TW4All's
+                    # shortener sometimes returns {"destination": "..."} instead
+                    # of {"link": {"domain":..., "hidden":...}}.
+                    dl_url = redir_props['destination']
 
-                        # dl_url is a HOST LANDING PAGE (GDFlix/FilePress/AppDrive/
-                        # MEGA), not a direct file. Downloading it as-is just saves
-                        # the HTML. If it's GDFlix, resolve it to the real direct
-                        # link using the bot's existing GDFlixResolver.
-                        final_url = None
-                        if 'gdflix' in dl_url.lower():
-                            try:
-                                gd_resolver = GDFlixResolver(self.st)
-                                direct_links = await gd_resolver.extract_all_methods(dl_url)
-                                if direct_links:
-                                    final_url = direct_links[0]
-                                    print(f"   ✅ {label} resolved via GDFlix: {final_url[:60]}...")
-                                else:
-                                    print(f"   ⚠️ {label}: GDFlix page gave no direct links")
-                            except Exception as ge:
-                                print(f"   ❌ {label} GDFlix resolve error: {ge}")
-                        else:
-                            # Unknown/unsupported host (FilePress, AppDrive, MEGA...).
-                            # No resolver exists for these yet, so skip rather than
-                            # silently downloading a broken/HTML "video" file.
-                            print(f"   ⚠️ {label}: unsupported host, no resolver — skipping")
+                if dl_url:
+                    print(f"   ↪️ {label} GDFlix host page: {dl_url[:60]}...")
 
-                        if final_url:
-                            quality_urls[label] = final_url
+                    # dl_url is a GDFlix LANDING PAGE, not a direct file.
+                    # Resolve it to the real direct link using the bot's
+                    # existing GDFlixResolver (same logic as direct GDFlix
+                    # downloads use elsewhere).
+                    final_url = None
+                    if 'gdflix' in dl_url.lower():
+                        try:
+                            gd_resolver = GDFlixResolver(self.st)
+                            direct_links = await gd_resolver.extract_all_methods(dl_url)
+                            if direct_links:
+                                final_url = direct_links[0]
+                                print(f"   ✅ {label} resolved: {final_url[:60]}...")
+                            else:
+                                print(f"   ⚠️ {label}: GDFlix page gave no direct links")
+                        except Exception as ge:
+                            print(f"   ❌ {label} GDFlix resolve error: {ge}")
                     else:
-                        print(f"   ⚠️ {label}: incomplete link data")
+                        # Shouldn't happen since we only pick GDFlix files
+                        # above, but guard anyway in case TW4All's host
+                        # naming varies.
+                        print(f"   ⚠️ {label}: expected GDFlix but got '{dl_url[:40]}' — skipping")
+
+                    if final_url:
+                        quality_urls[label] = final_url
                 else:
-                    print(f"   ⚠️ {label}: no redirect props")
+                    print(f"   ⚠️ {label}: no usable link/destination in redirect props")
             except Exception as e:
                 print(f"   ❌ {label} redirect error: {e}")
 
@@ -6708,8 +6719,11 @@ async def process_task(task, st):
 
             if not quality_urls:
                 await st.update(
-                    f"❌ **TW4ALL: No download links found**\n"
+                    f"❌ **TW4ALL: No GDFlix mirror available**\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"This episode isn't uploaded on GDFlix (only "
+                    f"other mirrors like MEGA/FilePress, which aren't "
+                    f"supported).\n"
                     f"🔗 URL: `{task.url[:60]}`\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━"
                 )
