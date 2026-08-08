@@ -4933,6 +4933,10 @@ class ToonWorld4AllFinder:
                 redir_html = redir_resp.text
                 redir_props = self._get_props(redir_html)
 
+                # NOTE: redir_props also contains a "destination" field (e.g.
+                # "https://exe.io/xxxxx") — that is an AD-SHORTENER link, not
+                # a usable host URL. We must NOT use it. The real final host
+                # URL is always in link.domain + link.hidden.
                 dl_url = None
                 if redir_props and 'link' in redir_props:
                     link_data = redir_props['link']
@@ -4940,11 +4944,6 @@ class ToonWorld4AllFinder:
                     hidden = link_data.get('hidden', '')
                     if domain and hidden:
                         dl_url = domain.rstrip('/') + '/' + hidden
-                if not dl_url and redir_props and redir_props.get('destination'):
-                    # Fallback shape seen on some redirect pages: TW4All's
-                    # shortener sometimes returns {"destination": "..."} instead
-                    # of {"link": {"domain":..., "hidden":...}}.
-                    dl_url = redir_props['destination']
 
                 if dl_url:
                     print(f"   ↪️ {label} GDFlix host page: {dl_url[:60]}...")
@@ -4974,7 +4973,7 @@ class ToonWorld4AllFinder:
                     if final_url:
                         quality_urls[label] = final_url
                 else:
-                    print(f"   ⚠️ {label}: no usable link/destination in redirect props")
+                    print(f"   ⚠️ {label}: incomplete link data in redirect props")
             except Exception as e:
                 print(f"   ❌ {label} redirect error: {e}")
 
