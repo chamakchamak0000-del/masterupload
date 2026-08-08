@@ -4643,6 +4643,15 @@ class HAZDownloader:
                         print(f"❌ HAZ HTTP {resp.status} for {quality}")
                         return None
 
+                    # Safety check: if the server handed back an HTML page instead
+                    # of a file (e.g. a landing/host page that wasn't fully
+                    # resolved), bail out now instead of saving a corrupt "video".
+                    ctype = resp.headers.get('Content-Type', '').lower()
+                    if 'text/html' in ctype:
+                        print(f"❌ HAZ got HTML instead of a file for {quality} "
+                              f"(url likely unresolved host page): {url[:80]}")
+                        return None
+
                     total = int(resp.headers.get('Content-Length', 0))
                     downloaded = 0
                     last_upd = time.time()
@@ -4877,7 +4886,10 @@ class ToonWorld4AllFinder:
         print(f"✅ TW4ALL: Found {len(encodes)} encode options")
 
         quality_urls = {}
-        preferred_hosts = ['FilePress', 'filepress', 'MEGA', 'mega', 'AppDrive', 'appdrive']
+        # GDFlix first: it's the only host this bot can fully resolve to a
+        # direct file (via GDFlixResolver). FilePress/AppDrive/MEGA have no
+        # resolver here, so a link to them would just download an HTML page.
+        preferred_hosts = ['GDFlix', 'gdflix', 'FilePress', 'filepress', 'MEGA', 'mega', 'AppDrive', 'appdrive']
 
         for encode in encodes:
             label = encode.get('readable', {}).get('codec', encode.get('resolution', 'Unknown'))
@@ -4885,7 +4897,7 @@ class ToonWorld4AllFinder:
             if not files:
                 continue
 
-            # Pick best host (prefer FilePress)
+            # Pick best host (prefer GDFlix, since it's the one we can fully resolve)
             chosen_file = None
             for host_pref in preferred_hosts:
                 for f in files:
@@ -4922,8 +4934,32 @@ class ToonWorld4AllFinder:
                     hidden = link_data.get('hidden', '')
                     if domain and hidden:
                         dl_url = domain.rstrip('/') + '/' + hidden
-                        quality_urls[label] = dl_url
-                        print(f"   ✅ {label}: {dl_url[:60]}...")
+                        print(f"   ↪️ {label} host page: {dl_url[:60]}...")
+
+                        # dl_url is a HOST LANDING PAGE (GDFlix/FilePress/AppDrive/
+                        # MEGA), not a direct file. Downloading it as-is just saves
+                        # the HTML. If it's GDFlix, resolve it to the real direct
+                        # link using the bot's existing GDFlixResolver.
+                        final_url = None
+                        if 'gdflix' in dl_url.lower():
+                            try:
+                                gd_resolver = GDFlixResolver(self.st)
+                                direct_links = await gd_resolver.extract_all_methods(dl_url)
+                                if direct_links:
+                                    final_url = direct_links[0]
+                                    print(f"   ✅ {label} resolved via GDFlix: {final_url[:60]}...")
+                                else:
+                                    print(f"   ⚠️ {label}: GDFlix page gave no direct links")
+                            except Exception as ge:
+                                print(f"   ❌ {label} GDFlix resolve error: {ge}")
+                        else:
+                            # Unknown/unsupported host (FilePress, AppDrive, MEGA...).
+                            # No resolver exists for these yet, so skip rather than
+                            # silently downloading a broken/HTML "video" file.
+                            print(f"   ⚠️ {label}: unsupported host, no resolver — skipping")
+
+                        if final_url:
+                            quality_urls[label] = final_url
                     else:
                         print(f"   ⚠️ {label}: incomplete link data")
                 else:
