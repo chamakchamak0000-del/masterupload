@@ -1,0 +1,10 @@
+pyrogram==2.0.106
+tgcrypto
+aiohttp
+requests
+flask
+beautifulsoup4
+selenium
+nest_asyncio
+psutil
+lxml
