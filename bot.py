@@ -4730,16 +4730,68 @@ class ToonWorld4AllFinder:
         self.st = st
         self.headers = {"User-Agent": self.UA}
 
+    def _get_soup_selenium_sync(self, url):
+        """Synchronous Selenium loader for Cloudflare-protected pages."""
+        driver = None
+        try:
+            print(f"   🌐 TW4ALL Selenium loading: {url[:60]}...")
+            driver = get_driver()
+            driver.set_page_load_timeout(30)
+            driver.get(url)
+            time.sleep(6)
+            if 'Just a moment' in driver.title or 'challenge' in driver.current_url:
+                print(f"   ⏳ TW4ALL: CF challenge still active, waiting 5s more...")
+                time.sleep(5)
+            html = driver.page_source
+            driver.quit()
+            return BeautifulSoup(html, 'html.parser')
+        except Exception as e:
+            print(f"   ❌ TW4ALL Selenium error: {e}")
+            if driver:
+                try: driver.quit()
+                except: pass
+            return None
+
+    def _get_html_selenium_sync(self, url):
+        """Like _get_soup_selenium_sync but returns raw HTML text (not
+        re-parsed), needed when we must regex the exact window.__PROPS__ JS
+        out of the page — parsing/reserializing through BeautifulSoup can
+        alter inline <script> content."""
+        driver = None
+        try:
+            print(f"   🌐 TW4ALL Selenium loading: {url[:60]}...")
+            driver = get_driver()
+            driver.set_page_load_timeout(30)
+            driver.get(url)
+            time.sleep(6)
+            if 'Just a moment' in driver.title or 'challenge' in driver.current_url:
+                print(f"   ⏳ TW4ALL: CF challenge still active, waiting 5s more...")
+                time.sleep(5)
+            html = driver.page_source
+            driver.quit()
+            return html
+        except Exception as e:
+            print(f"   ❌ TW4ALL Selenium error: {e}")
+            if driver:
+                try: driver.quit()
+                except: pass
+            return None
+
     async def _get_soup(self, url):
         try:
             resp = await asyncio.to_thread(
                 requests.get, url, headers=self.headers, timeout=20
             )
             if resp.status_code == 200:
+                if 'Just a moment' in resp.text[:800] or 'cf-browser-verification' in resp.text[:2000]:
+                    print(f"⚠️ TW4ALL: Cloudflare challenge page at {url[:60]} — trying Selenium")
+                    return await asyncio.to_thread(self._get_soup_selenium_sync, url)
                 return BeautifulSoup(resp.text, 'html.parser')
+            print(f"⚠️ TW4ALL fetch HTTP {resp.status_code} for {url[:60]} — trying Selenium")
         except Exception as e:
-            print(f"❌ TW4ALL fetch error: {e}")
-        return None
+            print(f"❌ TW4ALL fetch error: {e} — trying Selenium")
+        # Fallback to Selenium for anything requests couldn't handle
+        return await asyncio.to_thread(self._get_soup_selenium_sync, url)
 
     def _get_props(self, html):
         """Extract window.__PROPS__ JSON from archive page HTML."""
@@ -4826,7 +4878,12 @@ class ToonWorld4AllFinder:
         return title, latest[0], latest[1]
 
     async def resolve_episode_urls(self, ep, series_url, series_name):
-        """Return dict of {quality_label: direct_url} for an episode."""
+        """Return (quality_urls, reason) for an episode.
+        quality_urls: dict of {quality_label: direct_url} — empty on failure.
+        reason: short string explaining why, if quality_urls is empty:
+            'fetch_failed' | 'archive_not_found' | 'archive_fetch_failed' |
+            'no_props' | 'no_encodes' | 'no_gdflix' | None (success)
+        """
         import re as _re
 
         # If series URL given, find the archive URL for this episode
@@ -4836,7 +4893,8 @@ class ToonWorld4AllFinder:
         else:
             soup = await self._get_soup(series_url)
             if not soup:
-                return {}
+                print(f"❌ TW4ALL: Could not fetch series page {series_url[:60]}")
+                return {}, 'fetch_failed'
             content = (soup.find('div', class_='entry-content')
                        or soup.find('article')
                        or soup)
@@ -4856,7 +4914,7 @@ class ToonWorld4AllFinder:
 
         if not archive_url:
             print(f"❌ TW4ALL: No archive URL found for ep {ep}")
-            return {}
+            return {}, 'archive_not_found'
 
         print(f"📡 TW4ALL archive URL: {archive_url}")
 
@@ -4866,22 +4924,32 @@ class ToonWorld4AllFinder:
                 requests.get, archive_url, headers=self.headers, timeout=20
             )
             if resp.status_code != 200:
-                print(f"❌ TW4ALL archive HTTP {resp.status_code}")
-                return {}
-            html = resp.text
+                print(f"❌ TW4ALL archive HTTP {resp.status_code} — trying Selenium")
+                html = await asyncio.to_thread(self._get_html_selenium_sync, archive_url)
+                if not html:
+                    return {}, 'archive_fetch_failed'
+            else:
+                html = resp.text
+                if 'Just a moment' in html[:800] or 'cf-browser-verification' in html[:2000]:
+                    print(f"⚠️ TW4ALL: Cloudflare challenge on archive page — trying Selenium")
+                    html = await asyncio.to_thread(self._get_html_selenium_sync, archive_url)
+                    if not html:
+                        return {}, 'archive_fetch_failed'
         except Exception as e:
-            print(f"❌ TW4ALL archive fetch: {e}")
-            return {}
+            print(f"❌ TW4ALL archive fetch: {e} — trying Selenium")
+            html = await asyncio.to_thread(self._get_html_selenium_sync, archive_url)
+            if not html:
+                return {}, 'archive_fetch_failed'
 
         props = self._get_props(html)
         if not props:
             print("❌ TW4ALL: No __PROPS__ found in archive page")
-            return {}
+            return {}, 'no_props'
 
         encodes = props.get('data', {}).get('data', {}).get('encodes', [])
         if not encodes:
             print("❌ TW4ALL: No encodes in props")
-            return {}
+            return {}, 'no_encodes'
 
         print(f"✅ TW4ALL: Found {len(encodes)} encode options")
 
@@ -4977,7 +5045,9 @@ class ToonWorld4AllFinder:
             except Exception as e:
                 print(f"   ❌ {label} redirect error: {e}")
 
-        return quality_urls
+        if not quality_urls:
+            return quality_urls, 'no_gdflix'
+        return quality_urls, None
 
 
 class SmartCodedewResolver:
@@ -6710,19 +6780,47 @@ async def process_task(task, st):
             )
 
             finder = ToonWorld4AllFinder(st)
-            quality_urls = await finder.resolve_episode_urls(
+            quality_urls, fail_reason = await finder.resolve_episode_urls(
                 task.episode or 1,
                 task.url,
                 task.series_name
             )
 
             if not quality_urls:
+                reason_messages = {
+                    'fetch_failed': (
+                        "Couldn't load the series page (site may be blocking "
+                        "the request or is temporarily down)."
+                    ),
+                    'archive_not_found': (
+                        "Couldn't find this episode's archive link on the "
+                        "series page — the page layout may have changed."
+                    ),
+                    'archive_fetch_failed': (
+                        "Couldn't load the episode's archive/mirror page "
+                        "(site may be blocking the request or is down)."
+                    ),
+                    'no_props': (
+                        "The archive page loaded but its data couldn't be "
+                        "read — the site's page format may have changed."
+                    ),
+                    'no_encodes': (
+                        "The archive page has no quality/download options "
+                        "listed for this episode."
+                    ),
+                    'no_gdflix': (
+                        "This episode isn't uploaded on GDFlix (only other "
+                        "mirrors like MEGA/FilePress/HubCloud, which aren't "
+                        "supported)."
+                    ),
+                }
+                detail = reason_messages.get(
+                    fail_reason, "Unknown error while extracting download links."
+                )
                 await st.update(
-                    f"❌ **TW4ALL: No GDFlix mirror available**\n"
+                    f"❌ **TW4ALL: No download links found**\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"This episode isn't uploaded on GDFlix (only "
-                    f"other mirrors like MEGA/FilePress, which aren't "
-                    f"supported).\n"
+                    f"{detail}\n"
                     f"🔗 URL: `{task.url[:60]}`\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━"
                 )
